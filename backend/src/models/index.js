@@ -47,9 +47,39 @@ async function initDb() {
         -- Timestamp when the work item entered the CLOSED state
         end_time TIMESTAMP,
         -- Mean Time To Repair in seconds
-        mttr BIGINT
+        mttr BIGINT,
+        -- New fields for enhanced IMS
+        severity TEXT DEFAULT 'P2',
+        assigned_team TEXT,
+        assigned_owner TEXT,
+        signal_count INTEGER DEFAULT 0,
+        related_incident_id UUID,
+        cascade_info JSONB,
+        rca_suggestion JSONB,
+        sla_info JSONB
       );
     `);
+    
+    // Add columns if they don't exist (for backward compatibility)
+    const columnChecks = [
+      'severity', 'assigned_team', 'assigned_owner', 'signal_count',
+      'related_incident_id', 'cascade_info', 'rca_suggestion', 'sla_info'
+    ];
+    
+    for (const col of columnChecks) {
+      try {
+        await pgPool.query(`
+          ALTER TABLE work_items ADD COLUMN ${col} ${
+            col === 'severity' ? 'TEXT DEFAULT \'P2\'' :
+            col === 'signal_count' ? 'INTEGER DEFAULT 0' :
+            col === 'related_incident_id' ? 'UUID' :
+            'JSONB'
+          };
+        `);
+      } catch (e) {
+        // Column may already exist
+      }
+    }
     // Enable TimescaleDB extension and convert work_items into a hypertable on start_time
     try {
       await pgPool.query(`CREATE EXTENSION IF NOT EXISTS timescaledb;`);
@@ -196,6 +226,21 @@ async function getWorkItemById(id) {
 async function appendSignalToWorkItem(workItemId, signalData) {
   const Signal = mongooseConnection.model('Signal');
   await withRetry(() => Signal.create({ workItemId, data: signalData }));
+  // Increment signal count
+  await incrementSignalCount(workItemId);
+}
+
+/**
+ * Increment the signal count for a work item.
+ * @param {string} workItemId
+ */
+async function incrementSignalCount(workItemId) {
+  await withRetry(() =>
+    pgPool.query(
+      'UPDATE work_items SET signal_count = signal_count + 1 WHERE id = $1',
+      [workItemId]
+    )
+  );
 }
 
 /**
@@ -216,5 +261,6 @@ module.exports = {
   getWorkItems,
   getWorkItemById,
   appendSignalToWorkItem,
+  incrementSignalCount,
   getSignalsByWorkItemId
 };

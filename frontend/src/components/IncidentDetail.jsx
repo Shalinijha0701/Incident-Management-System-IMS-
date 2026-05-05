@@ -7,15 +7,39 @@ import React, { useEffect, useState } from 'react';
  */
 function IncidentDetail({ workItem, onTransition }) {
   const [signals, setSignals] = useState([]);
+  const [rcaSuggestion, setRcaSuggestion] = useState(null);
+  const [slaStatus, setSlaStatus] = useState(null);
+  const [auditLog, setAuditLog] = useState([]);
+  const [correlations, setCorrelations] = useState(null);
+  const [showReportMenu, setShowReportMenu] = useState(false);
 
   useEffect(() => {
     async function fetchDetails() {
       try {
-        const res = await fetch(`/work-items/${workItem.id}`);
-        const data = await res.json();
-        setSignals(data.signals);
+        const [detailRes, suggestionRes, slaRes, auditRes, corrRes] = await Promise.all([
+          fetch(`/work-items/${workItem.id}`),
+          fetch(`/work-items/${workItem.id}/rca-suggestion`),
+          fetch(`/work-items/${workItem.id}/sla-status`),
+          fetch(`/work-items/${workItem.id}/audit`),
+          fetch(`/work-items/${workItem.id}/correlations`)
+        ]);
+        
+        const detailData = await detailRes.json();
+        setSignals(detailData.signals);
+        
+        const suggestionData = await suggestionRes.json();
+        setRcaSuggestion(suggestionData);
+        
+        const slaData = await slaRes.json();
+        setSlaStatus(slaData);
+        
+        const auditData = await auditRes.json();
+        setAuditLog(auditData);
+        
+        const corrData = await corrRes.json();
+        setCorrelations(corrData);
       } catch (e) {
-        console.error('Failed to fetch signals', e);
+        console.error('Failed to fetch incident details', e);
       }
     }
     if (workItem) {
@@ -115,12 +139,68 @@ function IncidentDetail({ workItem, onTransition }) {
         </div>
       )}
 
+      {/* SLA Status */}
+      {slaStatus && (
+        <div style={{ marginBottom: '1.5rem', padding: '1rem', background: slaStatus.breached ? '#fff5f5' : '#f0f9ff', border: `1px solid ${slaStatus.breached ? '#ff6b6b' : '#4c6ef5'}`, borderRadius: 'var(--border-radius)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+            <strong>SLA Status</strong>
+            <span style={{ fontSize: '0.9rem', color: slaStatus.breached ? '#ff6b6b' : '#4c6ef5' }}>
+              {slaStatus.status}
+            </span>
+          </div>
+          {slaStatus.remaining && (
+            <small>⏱ {slaStatus.remaining.formatted} remaining (Deadline: {new Date(slaStatus.deadline).toLocaleString()})</small>
+          )}
+        </div>
+      )}
+
+      {/* Owner Assignment */}
+      {workItem.assignedOwner && (
+        <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'var(--gray-50)', borderRadius: 'var(--border-radius)' }}>
+          <div><strong>Assigned To:</strong> {workItem.assignedTeam}</div>
+          <div><strong>Owner:</strong> {workItem.assignedOwner}</div>
+        </div>
+      )}
+
+      {/* RCA Suggestion */}
+      {rcaSuggestion && rcaSuggestion.confidence > 0 && (
+        <div style={{ marginBottom: '1.5rem', padding: '1rem', background: '#f9f3e6', border: '1px solid #ffa500', borderRadius: 'var(--border-radius)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <strong>💡 AI-Suggested Root Cause</strong>
+            <span style={{ fontSize: '0.85rem', background: '#ffa500', color: 'white', padding: '0.25rem 0.5rem', borderRadius: '3px' }}>
+              Confidence: {rcaSuggestion.confidence}%
+            </span>
+          </div>
+          <div style={{ marginBottom: '0.5rem' }}>
+            <div><strong>Category:</strong> {rcaSuggestion.category}</div>
+            <div><strong>Root Cause:</strong> {rcaSuggestion.rootCause}</div>
+            <div><strong>Suggested Fix:</strong> {rcaSuggestion.fix}</div>
+            <div><strong>Prevention:</strong> {rcaSuggestion.prevention}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Incident Correlation */}
+      {correlations && correlations.correlation.isCorrelated && (
+        <div style={{ marginBottom: '1.5rem', padding: '1rem', background: '#ffe6f0', border: '1px solid #ff6b9d', borderRadius: 'var(--border-radius)' }}>
+          <strong>🔗 Related Incidents (Cascade Detection)</strong>
+          <div style={{ marginTop: '0.75rem', fontSize: '0.9rem' }}>
+            {correlations.correlation.relatedIncidents.map((rel, idx) => (
+              <div key={idx} style={{ marginBottom: '0.5rem' }}>
+                <div>→ {rel.relatedComponent} (Strength: {rel.correlationStrength})</div>
+                <small>Cascade Chain: {rel.cascadeChain}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* State transition buttons */}
-      <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.5rem' }}>
+      <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
         {workItem.status === 'OPEN' && (
           <button 
             onClick={() => onTransition && onTransition('INVESTIGATING')}
-            style={{ flex: 1 }}
+            style={{ flex: 1, minWidth: '150px' }}
           >
             Start Investigating
           </button>
@@ -129,12 +209,62 @@ function IncidentDetail({ workItem, onTransition }) {
           <button 
             onClick={() => onTransition && onTransition('RESOLVED')}
             className="success"
-            style={{ flex: 1 }}
+            style={{ flex: 1, minWidth: '150px' }}
           >
             Mark Resolved
           </button>
         )}
+        
+        {/* Report Export Buttons */}
+        {workItem.status === 'CLOSED' && (
+          <div style={{ position: 'relative', flex: 1, minWidth: '150px' }}>
+            <button 
+              onClick={() => setShowReportMenu(!showReportMenu)}
+              style={{ width: '100%' }}
+            >
+              📄 Export Report
+            </button>
+            {showReportMenu && (
+              <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'white', border: '1px solid var(--gray-200)', borderRadius: 'var(--border-radius)', marginTop: '0.5rem', zIndex: 10, boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+                <a 
+                  href={`/work-items/${workItem.id}/report/html`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ display: 'block', padding: '0.75rem 1rem', borderBottom: '1px solid var(--gray-200)', color: 'var(--primary-color)', textDecoration: 'none' }}
+                >
+                  Download as HTML
+                </a>
+                <a 
+                  href={`/work-items/${workItem.id}/report/text`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ display: 'block', padding: '0.75rem 1rem', color: 'var(--primary-color)', textDecoration: 'none' }}
+                >
+                  Download as Text
+                </a>
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Audit Log */}
+      {auditLog && auditLog.length > 0 && (
+        <div style={{ marginBottom: '1.5rem' }}>
+          <h3 style={{ marginBottom: '1rem' }}>Audit Trail</h3>
+          <div style={{ fontSize: '0.9rem', background: 'var(--gray-50)', borderRadius: 'var(--border-radius)', overflow: 'hidden' }}>
+            {auditLog.map((log, idx) => (
+              <div key={idx} style={{ padding: '0.75rem 1rem', borderBottom: idx !== auditLog.length - 1 ? '1px solid var(--gray-200)' : 'none' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
+                  <strong>{log.action}</strong>
+                  <small style={{ color: 'var(--gray-500)' }}>{new Date(log.timestamp).toLocaleString()}</small>
+                </div>
+                <small style={{ color: 'var(--gray-600)' }}>By: {log.changed_by}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Signals Section */}
       <div>

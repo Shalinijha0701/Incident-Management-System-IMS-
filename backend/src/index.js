@@ -20,8 +20,8 @@
  */
 require('dotenv').config();
 const fastify = require('fastify')({ logger: true });
-// Use the non-namespaced fastify-websocket plugin instead of @fastify/websocket
-const websocketPlugin = require('fastify-websocket');
+// Use @fastify/websocket for Fastify v4 compatibility
+const websocketPlugin = require('@fastify/websocket');
 const { Queue } = require('bullmq');
 const Redis = require('ioredis');
 
@@ -41,9 +41,24 @@ const {
 const { redisClient } = require('./cache/redis');
 const { WorkItemStateMachine } = require('./workflows/stateMachine');
 
+// Import new utilities for innovative features
+const { suggestRCA } = require('./utils/rcaSuggestion');
+const { calculateSLAStatus, determineSeverity } = require('./utils/slaTracking');
+const { assignOwner } = require('./utils/ownerAssignment');
+const { detectCorrelation, buildCascadeChain } = require('./utils/correlationDetection');
+const { getAuditLog, logTransition, initAuditLog } = require('./utils/auditLog');
+const { generateHTMLReport, generateTextReport } = require('./utils/pdfExport');
+const { predictSLABreach } = require('./utils/slaPrediction');
+const {
+  sendIncidentNotification,
+  getNotifications,
+  getNotificationStats
+} = require('./utils/notificationService');
+
 const redisConnection = {
   host: process.env.REDIS_HOST || 'redis',
-  port: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : 6379
+  port: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : 6379,
+  maxRetriesPerRequest: null
 };
 
 // Initialise BullMQ queue for signals
@@ -239,7 +254,23 @@ fastify.get('/work-items', async (request, reply) => {
     // Fallback to DB query on cache errors
     items = await getWorkItems();
   }
-  reply.send(items);
+  
+  // Enrich items with SLA and owner information
+  const enrichedItems = items.map(item => {
+    const severity = item.severity || determineSeverity(item.component_type, item.signal_count);
+    const slaStatus = calculateSLAStatus(item, severity);
+    const owner = item.assigned_owner ? { team: item.assigned_team, owner: item.assigned_owner } : assignOwner(item.component_type);
+    
+    return {
+      ...item,
+      severity,
+      sla: slaStatus,
+      assignedTeam: owner.team,
+      assignedOwner: owner.owner
+    };
+  });
+  
+  reply.send(enrichedItems);
 });
 
 // Timeseries metrics endpoint. This endpoint returns an array of buckets
@@ -352,6 +383,14 @@ fastify.post('/work-items/:id/transition', async (request, reply) => {
   }
   // Persist changes to DB; update start_time/end_time if provided
   await updateWorkItemStatus(id, to, rca, newStart, newEnd);
+  
+  // Log transition to audit trail
+  try {
+    await logTransition(id, item.status, to, { rca, changedBy: 'operator' });
+  } catch (e) {
+    fastify.log.warn('Failed to log transition to audit trail', e);
+  }
+  
   // Update cache: fetch updated item from DB and update the cached list
   try {
     const updatedItem = await getWorkItemById(id);
@@ -370,11 +409,231 @@ fastify.get('/live-feed', { websocket: true }, (connection /* SocketStream */, r
   });
 });
 
+// ===== NEW ENDPOINTS FOR INNOVATIVE FEATURES =====
+
+// Suggest RCA based on signals
+fastify.get('/work-items/:id/rca-suggestion', async (request, reply) => {
+  const id = request.params.id;
+  try {
+    const signals = await getSignalsByWorkItemId(id);
+    const suggestion = suggestRCA(signals);
+    reply.send(suggestion);
+  } catch (e) {
+    fastify.log.error('Failed to generate RCA suggestion', e);
+    reply.code(500).send({ error: 'Failed to generate suggestion' });
+  }
+});
+
+// Get SLA status for a work item
+fastify.get('/work-items/:id/sla-status', async (request, reply) => {
+  const id = request.params.id;
+  try {
+    const workItem = await getWorkItemById(id);
+    if (!workItem) {
+      return reply.code(404).send({ error: 'Work item not found' });
+    }
+    const severity = workItem.severity || determineSeverity(workItem.component_type, workItem.signal_count);
+    const slaStatus = calculateSLAStatus(workItem, severity);
+    reply.send(slaStatus);
+  } catch (e) {
+    fastify.log.error('Failed to fetch SLA status', e);
+    reply.code(500).send({ error: 'Failed to fetch SLA status' });
+  }
+});
+
+// Get audit trail for a work item
+fastify.get('/work-items/:id/audit', async (request, reply) => {
+  const id = request.params.id;
+  try {
+    const auditLog = await getAuditLog(id);
+    reply.send(auditLog);
+  } catch (e) {
+    fastify.log.error('Failed to fetch audit log', e);
+    reply.code(500).send({ error: 'Failed to fetch audit log' });
+  }
+});
+
+// Get correlated incidents
+fastify.get('/work-items/:id/correlations', async (request, reply) => {
+  const id = request.params.id;
+  try {
+    const workItem = await getWorkItemById(id);
+    if (!workItem) {
+      return reply.code(404).send({ error: 'Work item not found' });
+    }
+    const allIncidents = await getWorkItems();
+    const correlation = detectCorrelation(workItem, allIncidents);
+    const cascadeChain = buildCascadeChain(workItem, allIncidents);
+    reply.send({
+      correlation,
+      cascadeChain: cascadeChain.map(w => ({
+        id: w.id,
+        component: w.component_type,
+        status: w.status,
+        startTime: w.start_time
+      }))
+    });
+  } catch (e) {
+    fastify.log.error('Failed to fetch correlations', e);
+    reply.code(500).send({ error: 'Failed to fetch correlations' });
+  }
+});
+
+// Export incident as HTML report
+fastify.get('/work-items/:id/report/html', async (request, reply) => {
+  const id = request.params.id;
+  try {
+    const workItem = await getWorkItemById(id);
+    if (!workItem) {
+      return reply.code(404).send({ error: 'Work item not found' });
+    }
+    const signals = await getSignalsByWorkItemId(id);
+    const auditLog = await getAuditLog(id);
+    const html = generateHTMLReport(workItem, signals, auditLog);
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    reply.send(html);
+  } catch (e) {
+    fastify.log.error('Failed to generate report', e);
+    reply.code(500).send({ error: 'Failed to generate report' });
+  }
+});
+
+// Export incident as text report
+fastify.get('/work-items/:id/report/text', async (request, reply) => {
+  const id = request.params.id;
+  try {
+    const workItem = await getWorkItemById(id);
+    if (!workItem) {
+      return reply.code(404).send({ error: 'Work item not found' });
+    }
+    const signals = await getSignalsByWorkItemId(id);
+    const text = generateTextReport(workItem, signals);
+    reply.header('Content-Type', 'text/plain');
+    reply.send(text);
+  } catch (e) {
+    fastify.log.error('Failed to generate text report', e);
+    reply.code(500).send({ error: 'Failed to generate report' });
+  }
+});
+
+// Get system observability metrics (live throughput widget)
+fastify.get('/observability/live', async (request, reply) => {
+  reply.send({
+    signalsPerSecond: lastThroughput,
+    queueDepth: await signalQueue.count(),
+    activeIncidents: (await getWorkItems()).filter(w => w.status !== 'CLOSED').length,
+    dlqCount: await dlqQueue.count(),
+    timestamp: new Date()
+  });
+});
+
+// ===== UPGRADE 3: SLA BREACH PREDICTION =====
+fastify.get('/work-items/:id/sla-prediction', async (request, reply) => {
+  const id = request.params.id;
+  try {
+    const workItem = await getWorkItemById(id);
+    if (!workItem) {
+      return reply.code(404).send({ error: 'Work item not found' });
+    }
+
+    const severity = workItem.severity || determineSeverity(workItem.component_type, workItem.signal_count);
+    const slaStatus = calculateSLAStatus(workItem, severity);
+    const signalVelocity = workItem.signal_count || 0;
+
+    const prediction = predictSLABreach(workItem, slaStatus, signalVelocity);
+    reply.send(prediction);
+  } catch (e) {
+    fastify.log.error('Failed to predict SLA breach', e);
+    reply.code(500).send({ error: 'Failed to predict SLA breach' });
+  }
+});
+
+// ===== UPGRADE 4: NOTIFICATION CENTER =====
+fastify.get('/notifications', async (request, reply) => {
+  try {
+    const limit = request.query.limit ? parseInt(request.query.limit, 10) : 50;
+    const notifications = getNotifications(limit);
+    reply.send(notifications);
+  } catch (e) {
+    fastify.log.error('Failed to fetch notifications', e);
+    reply.code(500).send({ error: 'Failed to fetch notifications' });
+  }
+});
+
+fastify.get('/notifications/stats', async (request, reply) => {
+  try {
+    const stats = getNotificationStats();
+    reply.send(stats);
+  } catch (e) {
+    fastify.log.error('Failed to fetch notification stats', e);
+    reply.code(500).send({ error: 'Failed to fetch notification stats' });
+  }
+});
+
+// ===== UPGRADE 5: DEMO MODE - SIMULATE OUTAGE =====
+fastify.post('/demo/simulate-outage', async (request, reply) => {
+  try {
+    const scenarios = [
+      {
+        componentId: 'RDBMS_CLUSTER_01',
+        componentType: 'RDBMS',
+        message: 'Database connection pool exhausted. Max connections: 100, Current: 112'
+      },
+      {
+        componentId: 'API_SERVICE_01',
+        componentType: 'API',
+        message: 'API latency spike. Response times up from 50ms to 5000ms'
+      },
+      {
+        componentId: 'CACHE_CLUSTER_01',
+        componentType: 'CACHE',
+        message: 'Cache miss rate spiking to 85%. Fallback to database load increasing'
+      }
+    ];
+
+    let totalSignals = 0;
+
+    // Generate signals for cascade effect
+    for (const scenario of scenarios) {
+      for (let i = 0; i < 25; i++) {
+        await signalQueue.add(
+          'signal',
+          {
+            componentId: scenario.componentId,
+            componentType: scenario.componentType,
+            message: scenario.message
+          },
+          {
+            removeOnComplete: true,
+            attempts: 3
+          }
+        );
+
+        signalCount += 1;
+        signalTotal += 1;
+        totalSignals += 1;
+      }
+    }
+
+    reply.send({
+      success: true,
+      message: 'Demo cascade outage simulated. Check live feed for incidents.',
+      totalSignals,
+      scenarios: scenarios.length
+    });
+  } catch (e) {
+    fastify.log.error('Failed to simulate outage', e);
+    reply.code(500).send({ error: 'Failed to simulate outage' });
+  }
+});
+
 // Start server
 async function startServer() {
   try {
     // Ensure DB connections are established
-    await initDb();
+    const db = await initDb();
+    // Initialize audit log table
+    await initAuditLog(db.pg);
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
     await fastify.listen({ port, host: '0.0.0.0' });
     fastify.log.info(`IMS backend listening on port ${port}`);

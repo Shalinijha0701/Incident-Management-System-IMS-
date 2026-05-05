@@ -1,6 +1,9 @@
 FROM node:18-alpine
 WORKDIR /usr/src/app
 
+# Install curl for healthcheck
+RUN apk add --no-cache curl
+
 COPY package.json package-lock.json* ./
 RUN npm install
 

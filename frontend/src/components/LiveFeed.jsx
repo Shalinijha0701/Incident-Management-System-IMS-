@@ -40,8 +40,9 @@ function LiveFeed({ onSelect, refreshKey }) {
       try {
         const newItem = JSON.parse(event.data);
         setWorkItems(prev => {
+          // Filter out duplicate: if item with same ID already exists, don't add it
+          const updated = [newItem, ...prev.filter(item => item.id !== newItem.id)];
           const order = { RDBMS: 0, API: 1, CACHE: 2, 'Async Queue': 3, MCP: 4 };
-          const updated = [newItem, ...prev];
           return updated.sort((a, b) => {
             const aVal = order[a.component_type] ?? 99;
             const bVal = order[b.component_type] ?? 99;
@@ -153,8 +154,11 @@ function LiveFeed({ onSelect, refreshKey }) {
               >
                 <div className="incident-badge">
                   <span className={`badge ${severity.className}`}>
-                    {severity.level}
+                    {item.severity || severity.level}
                   </span>
+                  {item.sla && item.sla.breached && (
+                    <span className="badge" style={{ background: '#ff6b6b', marginLeft: '0.3rem' }}>⚠ SLA</span>
+                  )}
                 </div>
                 <div className="incident-content">
                   <div className="incident-title">{item.component_id}</div>
@@ -162,8 +166,18 @@ function LiveFeed({ onSelect, refreshKey }) {
                     <span className={`badge ${statusBadgeClass}`} style={{ marginRight: '0.5rem', display: 'inline-block' }}>
                       {item.status}
                     </span>
+                    {item.assignedOwner && (
+                      <span style={{ fontSize: '0.85rem', color: 'var(--gray-500)', marginLeft: '0.5rem' }}>
+                        👤 {item.assignedOwner}
+                      </span>
+                    )}
                   </div>
                   <div className="incident-type">{item.component_type}</div>
+                  {item.sla && !item.sla.breached && item.sla.remaining && (
+                    <small style={{ display: 'block', marginTop: '0.25rem', color: item.sla.remaining.minutes < 5 ? '#ff922b' : '#4c6ef5' }}>
+                      SLA: {item.sla.remaining.formatted} remaining
+                    </small>
+                  )}
                   <small style={{ display: 'block', marginTop: '0.5rem' }}>
                     {new Date(item.start_time).toLocaleString()}
                   </small>

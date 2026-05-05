@@ -31,6 +31,9 @@ function Metrics() {
       }
     }
     fetchAll();
+    // Set up auto-refresh every 10 seconds
+    const interval = setInterval(fetchAll, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   if (error) {

@@ -149,7 +149,7 @@ To simulate an outage across multiple components, run the seeding script
 inside the backend container:
 
 ```bash
-docker-compose exec backend node /usr/src/app/scripts/seed-failure.js
+docker-compose exec backend node scripts/seed-failure.js
 ```
 
 This script enqueues a batch of failure signals across multiple component

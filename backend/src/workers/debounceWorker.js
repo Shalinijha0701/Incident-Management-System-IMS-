@@ -15,16 +15,20 @@ require('dotenv').config();
 const { Worker, Queue } = require('bullmq');
 const Redis = require('ioredis');
 const {
+  initDb,
   createWorkItem,
   appendSignalToWorkItem
 } = require('../models');
 const { addWorkItem } = require('../utils/dashboardCache');
 const { redisClient } = require('../cache/redis');
 const { alert } = require('../workflows/alertStrategy');
+const { determineSeverity } = require('../utils/slaTracking');
+const { sendIncidentNotification } = require('../utils/notificationService');
 
 const connection = {
   host: process.env.REDIS_HOST || 'redis',
-  port: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : 6379
+  port: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : 6379,
+  maxRetriesPerRequest: null
 };
 
 // Separate Redis client for publishing events
@@ -35,6 +39,9 @@ const pub = new Redis(connection);
 // and error details. This makes it easy to inspect or reprocess failed
 // signals without dropping them silently.
 const dlqQueue = new Queue('dead-letter', { connection });
+
+// Initialize database before creating worker
+let dbInitialized = false;
 
 // Create a worker to process jobs from the "signals" queue
 const worker = new Worker(
@@ -54,6 +61,9 @@ const worker = new Worker(
       await appendSignalToWorkItem(workItem.id, signal);
       // Trigger alert
       alert(componentType, workItem);
+      // Send notification to dispatch center
+      const severity = determineSeverity(componentType, 1);
+      sendIncidentNotification(workItem, severity);
       // Publish work item to WebSocket subscribers via Redis pub/sub
       await pub.publish('workitem:created', JSON.stringify(workItem));
       // Update dashboard cache with the new work item
@@ -87,4 +97,24 @@ worker.on('failed', (job, err) => {
       console.error('Failed to enqueue to dead-letter queue', e);
     }
   })();
+});
+
+// Start the worker with database initialization
+async function startWorker() {
+  try {
+    // Initialize database connections before processing any jobs
+    await initDb();
+    dbInitialized = true;
+    console.log('Database initialized for worker');
+    console.log('Debounce worker started and ready to process signals');
+  } catch (err) {
+    console.error('Failed to initialize database for worker', err);
+    process.exit(1);
+  }
+}
+
+// Start the worker
+startWorker().catch(err => {
+  console.error('Fatal error starting worker', err);
+  process.exit(1);
 });
